@@ -1,10 +1,17 @@
 import axios from "axios";
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ??
-  (typeof window !== "undefined" && window.location.hostname !== "localhost"
-    ? "https://nba-analysis-production.up.railway.app"
-    : "http://localhost:8001");
+function makeBaseUrl(raw: string | undefined): string {
+  const fallback =
+    typeof window !== "undefined" && window.location.hostname !== "localhost"
+      ? "https://nba-analysis-production.up.railway.app"
+      : "http://localhost:8001";
+  const url = raw || fallback;
+  // ensure protocol is present
+  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  return "https://" + url;
+}
+
+const BASE_URL = makeBaseUrl(process.env.NEXT_PUBLIC_API_URL);
 
 export const api = axios.create({
   baseURL: `${BASE_URL}/api/v1`,
