@@ -1,20 +1,31 @@
 import os
+import asyncio
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from .core.database import engine, Base
 from .api.routes import players, teams, standings, analytics, scouting, roster, sync, trades, free_agency, draft
 
+logger = logging.getLogger(__name__)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+
+async def _background_sync():
+    """Run the data sync in the background so /health passes immediately."""
+    await asyncio.sleep(5)   # let the server fully start first
     try:
         await sync.maybe_auto_sync()
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("Startup sync failed (will retry on /sync): %s", exc)
+        logger.warning("Background startup sync failed (hit /api/v1/sync/ to retry): %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Create tables (fast — just schema DDL)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    # Kick off data sync in background — don't block startup
+    asyncio.create_task(_background_sync())
     yield
 
 
