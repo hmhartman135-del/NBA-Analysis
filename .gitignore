@@ -1,7 +1,18 @@
-*.pyc
+# Python
 __pycache__/
+*.pyc
+*.pyo
 .venv/
+*.egg-info/
+dist/
 .env
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/.env.local
+
+# Misc
 *.log
+.DS_Store
 .data_loaded
-node_modules/
