@@ -1,8 +1,10 @@
 """
-Sync routes — pull fresh data from stats.nba.com into the local DB.
+Sync routes — pull fresh data from ESPN (rosters) + stats.nba.com (stats) into the local DB.
+ESPN is used for rosters because it reflects trades/signings in real-time.
 """
 import logging
 import asyncio
+import httpx
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +14,10 @@ from ...data import nba_client
 from ...models.team import Team
 from ...models.player import Player
 from ...models.stats import PlayerStats
+
+ESPN_TEAMS_URL  = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams?limit=40"
+ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team_id}/roster"
+ESPN_HEADERS    = {"User-Agent": "Mozilla/5.0"}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
@@ -62,68 +68,96 @@ async def _sync_teams(db: AsyncSession) -> None:
     await db.flush()
 
 
+async def _fetch_espn_team_map() -> dict[str, str]:
+    """Returns {abbreviation → espn_team_id} for all 30 NBA teams."""
+    async with httpx.AsyncClient(headers=ESPN_HEADERS, timeout=15) as client:
+        r = await client.get(ESPN_TEAMS_URL)
+        r.raise_for_status()
+    raw = r.json()["sports"][0]["leagues"][0]["teams"]
+    return {t["team"]["abbreviation"]: t["team"]["id"] for t in raw}
+
+
+async def _fetch_espn_roster(espn_team_id: str) -> list[dict]:
+    """Returns list of athlete dicts from ESPN for one team."""
+    url = ESPN_ROSTER_URL.format(team_id=espn_team_id)
+    async with httpx.AsyncClient(headers=ESPN_HEADERS, timeout=15) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+    return r.json().get("athletes", [])
+
+
 async def _sync_rosters(db: AsyncSession) -> None:
     """
-    Pull CommonTeamRoster for every team — gives current roster with
-    position, height, weight, jersey number, age, and team assignment.
-    Rate-limit to avoid hammering stats.nba.com.
+    Pull live rosters from ESPN — reflects trades, signings, and draft picks
+    immediately (no season-lag like stats.nba.com).
     """
     teams_result = await db.execute(select(Team))
     teams = teams_result.scalars().all()
 
+    try:
+        espn_map = await _fetch_espn_team_map()
+    except Exception as e:
+        logger.error("Could not fetch ESPN team map: %s", e)
+        return
+
     for team in teams:
-        if not team.nba_id:
-            continue
-        try:
-            roster_data = await nba_client.get_team_roster(team.nba_id, CURRENT_SEASON)
-            rows = roster_data.get("CommonTeamRoster", [])
-        except Exception as e:
-            logger.warning("Roster fetch failed for %s: %s", team.full_name, e)
-            await asyncio.sleep(1)
+        abbr = team.abbreviation
+        espn_id = espn_map.get(abbr)
+        if not espn_id:
+            # Try a few known abbreviation mismatches
+            alt = {"BKN": "17", "NOP": "3", "UTA": "26", "GS": "9", "NY": "18", "SA": "24"}
+            espn_id = alt.get(abbr)
+        if not espn_id:
+            logger.warning("No ESPN ID for team %s (%s)", team.full_name, abbr)
             continue
 
-        for row in rows:
-            nba_id = row.get("PLAYER_ID")
-            if not nba_id:
+        try:
+            athletes = await _fetch_espn_roster(espn_id)
+        except Exception as e:
+            logger.warning("ESPN roster fetch failed for %s: %s", team.full_name, e)
+            await asyncio.sleep(0.5)
+            continue
+
+        for a in athletes:
+            espn_player_id = int(a.get("id", 0))
+            if not espn_player_id:
                 continue
 
-            result = await db.execute(select(Player).where(Player.nba_id == nba_id))
+            # Match by ESPN id stored in nba_id, or fall back to name
+            result = await db.execute(select(Player).where(Player.nba_id == espn_player_id))
             player = result.scalar_one_or_none()
             if not player:
-                player = Player(nba_id=nba_id)
+                # Try matching by full name
+                full_name = a.get("fullName", "")
+                result2 = await db.execute(select(Player).where(Player.full_name == full_name))
+                player = result2.scalar_one_or_none()
+            if not player:
+                player = Player(nba_id=espn_player_id)
                 db.add(player)
 
-            player.full_name = row.get("PLAYER", player.full_name or "")
-            # Split name into first/last
-            parts = player.full_name.split(" ", 1)
-            player.first_name = parts[0]
-            player.last_name = parts[1] if len(parts) > 1 else ""
+            player.nba_id    = espn_player_id
+            player.full_name = a.get("fullName", player.full_name or "")
+            player.first_name = a.get("firstName", "")
+            player.last_name  = a.get("lastName", "")
+            player.team_id    = team.id
+            player.status     = "active"
+            player.jersey_number = a.get("jersey")
+            pos = a.get("position", {})
+            player.position = pos.get("abbreviation") if isinstance(pos, dict) else None
 
-            player.team_id = team.id
-            player.status = "active"
-            player.jersey_number = row.get("NUM")
-            player.position = row.get("POSITION")
-            player.height = row.get("HEIGHT")
-            player.weight = int(row["WEIGHT"]) if row.get("WEIGHT") else None
-            player.age = int(row["AGE"]) if row.get("AGE") else None
+            # Height in inches → "6-7" format
+            h = a.get("height")
+            if h:
+                feet, inches = divmod(int(h), 12)
+                player.height = f"{feet}-{inches}"
 
-            # Parse birth date  "APR 03, 1999" → date
-            birth_str = row.get("BIRTH_DATE")
-            if birth_str:
-                try:
-                    from datetime import date
-                    import calendar
-                    month_abbr, day_year = birth_str.split(" ", 1)
-                    day, year = day_year.replace(",", "").split()
-                    month = list(calendar.month_abbr).index(month_abbr.capitalize())
-                    player.birth_date = date(int(year), month, int(day))
-                except Exception:
-                    pass
+            player.weight = int(a["weight"]) if a.get("weight") else None
+            player.age    = int(a["age"])    if a.get("age")    else None
 
         await db.flush()
-        await asyncio.sleep(0.6)   # be polite to stats.nba.com
+        await asyncio.sleep(0.3)
 
-    logger.info("Roster sync complete for %d teams", len(teams))
+    logger.info("ESPN roster sync complete for %d teams", len(teams))
 
 
 async def _upsert_stats(db: AsyncSession, rows: list[dict], season_type: str) -> None:
