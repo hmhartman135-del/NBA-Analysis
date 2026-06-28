@@ -26,14 +26,16 @@ async def grade_trade(teams: list[dict]) -> str:
     """
     legs = []
     for t in teams:
-        out_str = ", ".join(
+        out_parts = [
             f"{p['name']} ({p.get('position','?')}, {p.get('points','?')} PPG)"
             for p in t["players_out"]
-        ) or "Nothing"
-        in_str = ", ".join(
+        ] + t.get("picks_out", [])
+        in_parts = [
             f"{p['name']} ({p.get('position','?')}, {p.get('points','?')} PPG)"
             for p in t["players_in"]
-        ) or "Nothing"
+        ] + t.get("picks_in", [])
+        out_str = ", ".join(out_parts) or "Nothing"
+        in_str  = ", ".join(in_parts)  or "Nothing"
         legs.append(f"**{t['team_name']}** sends: {out_str}\n**{t['team_name']}** receives: {in_str}")
 
     trade_str = "\n\n".join(legs)

@@ -41,7 +41,8 @@ async def _player_stat_dict(player_id: UUID, db: AsyncSession) -> dict:
 # ── Grade a multi-team trade ──────────────────────────────────────────────────
 class TradeLeg(BaseModel):
     team_id: str
-    players_out: list[str]   # player IDs being sent away
+    players_out: list[str] = []   # player UUIDs being sent away
+    picks_out: list[str] = []     # e.g. ["2027 1st Round Pick", "2028 2nd Round Pick"]
 
 
 class GradeTradeRequest(BaseModel):
@@ -84,10 +85,14 @@ async def grade_trade_route(body: GradeTradeRequest, db: AsyncSession = Depends(
             stats = await _player_stat_dict(UUID(pid), db)
             players_in.append({"name": p.full_name, "position": p.position, **stats})
 
+        picks_in = [pk for l in body.legs if l.team_id != leg.team_id for pk in l.picks_out]
+
         teams_payload.append({
             "team_name": team.full_name,
             "players_out": players_out,
             "players_in": players_in,
+            "picks_out": leg.picks_out,
+            "picks_in": picks_in,
         })
 
     analysis = await grade_trade(teams_payload)
