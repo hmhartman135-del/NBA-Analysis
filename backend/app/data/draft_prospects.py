@@ -1,6 +1,5 @@
 """
-Scrape 2026 NBA Draft prospect rankings + college stats from CBS Sports.
-Also pulls the draft order from ESPN.
+2026 NBA Draft — actual results (post-draft) + prospect scouting data from CBS Sports.
 Cached in memory for 6 hours.
 """
 import asyncio
@@ -19,10 +18,10 @@ _order_cache: list[dict] = []
 _cache_time: datetime | None = None
 _CACHE_TTL = timedelta(hours=6)
 
-CBS_URL   = "https://www.cbssports.com/nba/draft/prospect-rankings/"
+CBS_URL    = "https://www.cbssports.com/nba/draft/prospect-rankings/"
 ESPN_DRAFT = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/draft?season=2026"
 ESPN_TEAMS = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams?limit=40"
-HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+HEADERS    = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
 
 def _scrape_prospects() -> list[dict]:
@@ -43,7 +42,7 @@ def _scrape_prospects() -> list[dict]:
                 i += 1
                 continue
             rank = int(cells[0])
-            if re.match(r"^\d+\.\d", cells[1]):   # stat row mistaken for player
+            if re.match(r"^\d+\.\d", cells[1]):
                 i += 1
                 continue
 
@@ -59,7 +58,6 @@ def _scrape_prospects() -> list[dict]:
                 "fg_pct": None, "mpg": None,
             }
 
-            # Stats are in the very next row (cells at indices 6-10)
             if i + 1 < len(rows):
                 sc = [td.get_text(strip=True) for td in rows[i + 1].find_all(["td", "th"])]
                 if len(sc) >= 10:
@@ -69,7 +67,7 @@ def _scrape_prospects() -> list[dict]:
                         prospect["rpg"]    = float(sc[8])
                         prospect["apg"]    = float(sc[9])
                         prospect["fg_pct"] = float(sc[10]) if len(sc) > 10 else None
-                        i += 2   # skip stat+header rows
+                        i += 2
                     except (ValueError, IndexError):
                         pass
 
@@ -80,13 +78,12 @@ def _scrape_prospects() -> list[dict]:
 
 
 def _scrape_draft_order() -> list[dict]:
-    """Return [{overall, round, pick, espn_team_id, team_abbr, team_name}]"""
-    # Get picks
+    """Return actual 2026 draft picks. ESPN API now includes athlete info post-draft."""
     r1 = httpx.get(ESPN_DRAFT, headers=HEADERS, timeout=15)
     r1.raise_for_status()
-    picks_raw = r1.json().get("picks", [])
+    data = r1.json()
+    picks_raw = data.get("picks", [])
 
-    # Get ESPN → NBA team map
     r2 = httpx.get(ESPN_TEAMS, headers=HEADERS, timeout=15)
     r2.raise_for_status()
     teams_raw = r2.json()["sports"][0]["leagues"][0]["teams"]
@@ -96,6 +93,15 @@ def _scrape_draft_order() -> list[dict]:
     for p in picks_raw:
         tid = str(p.get("teamId", ""))
         team = team_map.get(tid, {})
+
+        # Post-draft: ESPN includes athlete info
+        athlete = p.get("athlete", {})
+        player_name = athlete.get("displayName") or athlete.get("fullName") or ""
+        player_pos  = athlete.get("position", {}).get("abbreviation", "") if isinstance(athlete.get("position"), dict) else ""
+        player_school = ""
+        if athlete.get("college"):
+            player_school = athlete["college"].get("name", "")
+
         order.append({
             "overall":      p["overall"],
             "round":        p["round"],
@@ -104,6 +110,10 @@ def _scrape_draft_order() -> list[dict]:
             "team_abbr":    team.get("abbreviation", ""),
             "team_name":    team.get("displayName", "Unknown"),
             "traded":       p.get("traded", False),
+            # Actual pick info (populated after draft)
+            "player_name":  player_name,
+            "player_pos":   player_pos,
+            "player_school": player_school,
         })
 
     return order
@@ -129,5 +139,5 @@ async def get_prospects() -> list[dict]:
 async def get_draft_order() -> list[dict]:
     global _order_cache, _cache_time
     if not _order_cache:
-        await get_prospects()   # populates both
+        await get_prospects()
     return _order_cache

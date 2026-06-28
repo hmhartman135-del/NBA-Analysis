@@ -27,6 +27,9 @@ interface DraftPick {
   team_name: string;
   team_abbr: string;
   traded: boolean;
+  player_name?: string;
+  player_pos?: string;
+  player_school?: string;
 }
 
 interface MockPick {
@@ -237,6 +240,12 @@ function MockDraft() {
         </button>
       </div>
 
+      {order.some(p => p.player_name) && (
+        <div className="mb-3 px-3 py-2 bg-green-950/30 border border-green-900/40 rounded-lg text-sm text-green-300">
+          ✓ Showing actual 2026 NBA Draft results
+        </div>
+      )}
+
       {myTeam && (
         <div className="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-900/40 rounded-lg text-sm text-amber-300">
           You're picking for <strong>{myTeam}</strong>. Other teams' picks will be shown as TBD — fill in your team's slots.
@@ -258,7 +267,14 @@ function MockDraft() {
                   {slot.traded && <span className="text-xs text-blue-400 shrink-0">(traded)</span>}
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  {myPick ? (
+                  {slot.player_name ? (
+                    // Actual 2026 Draft result
+                    <div className="text-right">
+                      <span className="text-sm font-medium text-green-300">{slot.player_name}</span>
+                      {slot.player_pos && <span className="ml-1.5 text-xs text-gray-500">{slot.player_pos}</span>}
+                      {slot.player_school && <div className="text-xs text-gray-600">{slot.player_school}</div>}
+                    </div>
+                  ) : myPick ? (
                     <>
                       <span className="text-sm font-medium truncate max-w-[140px]">{myPick.prospect_name}</span>
                       <span className="text-xs text-gray-500">#{myPick.prospect_rank}</span>
