@@ -20,19 +20,31 @@ CURRENT_SEASON = "2025-26"
 _last_sync: datetime | None = None
 
 
+async def _run_full_sync() -> None:
+    global _last_sync
+    from ...core.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        await _sync_teams(session)
+        await _sync_rosters(session)
+        await _sync_stats(session)
+        await session.commit()
+    _last_sync = datetime.now(timezone.utc)
+
+
 async def maybe_auto_sync() -> None:
     global _last_sync
     if _last_sync and (datetime.now(timezone.utc) - _last_sync) < timedelta(hours=12):
         return
     logger.info("Auto-syncing NBA data...")
-    from ...core.database import AsyncSessionLocal
-    async with AsyncSessionLocal() as session:
-        await _sync_teams(session)
-        await _sync_rosters(session)   # replaces _sync_players — gets team assignments + details
-        await _sync_stats(session)
-        await session.commit()
-    _last_sync = datetime.now(timezone.utc)
+    await _run_full_sync()
     logger.info("NBA auto-sync complete")
+
+
+async def force_sync() -> None:
+    """Always runs — bypasses the throttle. Used by the daily background loop."""
+    logger.info("Force sync: pulling fresh rosters and stats from stats.nba.com...")
+    await _run_full_sync()
+    logger.info("Force sync complete.")
 
 
 async def _sync_teams(db: AsyncSession) -> None:
@@ -170,10 +182,16 @@ async def _sync_stats(db: AsyncSession) -> None:
 
 
 @router.post("/")
-async def trigger_sync(db: AsyncSession = Depends(get_db)):
-    global _last_sync
-    await _sync_teams(db)
-    await _sync_rosters(db)
-    await _sync_stats(db)
-    _last_sync = datetime.now(timezone.utc)
+async def trigger_sync():
+    await force_sync()
     return {"status": "ok", "synced_at": _last_sync.isoformat()}
+
+
+@router.get("/status")
+async def sync_status():
+    return {
+        "last_sync": _last_sync.isoformat() if _last_sync else None,
+        "next_sync_in_hours": round(
+            24 - (datetime.now(timezone.utc) - _last_sync).total_seconds() / 3600, 1
+        ) if _last_sync else 0,
+    }
